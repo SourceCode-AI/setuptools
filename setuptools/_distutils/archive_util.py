@@ -91,22 +91,47 @@ def make_tarball(base_name, base_dir, compress="gzip", verbose=0, dry_run=0,
 
     log.info('Creating tar archive')
 
-    uid = _get_uid(owner)
-    gid = _get_gid(group)
+    source_date_epoch = os.environ.get('SOURCE_DATE_EPOCH')
 
-    def _set_uid_gid(tarinfo):
+    if source_date_epoch is not None:
+        # Set standard values for the reproducible builds
+        uid = 0
+        gid = 0
+        owner = ""
+        group = ""
+        archive_format = tarfile.PAX_FORMAT
+        source_date_epoch = int(source_date_epoch)
+        pax_headers = {'name': '%d/PaxHeaders/%f'}
+    else:
+        uid = _get_uid(owner)
+        gid = _get_gid(group)
+        archive_format = tarfile.DEFAULT_FORMAT
+        pax_headers = None
+
+    def _set_uid_gid_mtime(tarinfo):
         if gid is not None:
             tarinfo.gid = gid
             tarinfo.gname = group
         if uid is not None:
             tarinfo.uid = uid
             tarinfo.uname = owner
+        if source_date_epoch is not None:
+            tarinfo.mtime = source_date_epoch
         return tarinfo
 
     if not dry_run:
-        tar = tarfile.open(archive_name, 'w|%s' % tar_compression[compress])
+        tar = tarfile.open(archive_name, 'w|%s' % tar_compression[compress], format=archive_format, pax_headers=pax_headers)
         try:
-            tar.add(base_dir, filter=_set_uid_gid)
+            file_list = []
+            for (dirpath, _, filenames) in os.walk(base_dir):
+                for filename in filenames:
+                    file_list.append(os.path.join(dirpath, filename))
+
+            # Make sure we have deterministic ordering of files inside the archive
+            file_list.sort()
+
+            for filename in file_list:
+                tar.add(filename, filter=_set_uid_gid_mtime)
         finally:
             tar.close()
 

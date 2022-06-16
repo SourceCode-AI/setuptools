@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tarfile
 import tempfile
 import unicodedata
 import contextlib
@@ -114,6 +115,19 @@ class TestSdistTest:
         assert os.path.join('sdist_test', 'b.txt') in manifest
         assert os.path.join('sdist_test', 'c.rst') not in manifest
         assert os.path.join('d', 'e.dat') in manifest
+
+    def check_tarfile_members(self, cmd, func):
+        """
+        Runs the `func(<TarInfo>)` function on each member inside the tarfiles
+        """
+        compressions = {'gztar': 'r|gz', 'bztar': 'r|bz2', 'xztar': 'r|xz', 'tar': 'r|'}
+
+        for archive_file, archive_format in zip(cmd.archive_files, cmd.formats):
+            open_mode = compressions.get(archive_format, 'r|*')
+
+            with tarfile.open(archive_file, open_mode) as archive:
+                for member in archive.getmembers():
+                    func(member)
 
     def test_package_data_in_sdist(self):
         """Regression test for pull request #4: ensures that files listed in
@@ -255,6 +269,50 @@ class TestSdistTest:
         assert 'readme.rst' not in manifest, manifest
         assert 'setup.py' not in manifest, manifest
         assert 'setup.cfg' not in manifest, manifest
+
+    def test_reproducible_sdist(self):
+        dist = Distribution(SETUP_ATTRS)
+        dist.script_name = "setup.py"
+        previous_source_date_epoch = os.environ.get("SOURCE_DATE_EPOCH")
+        try:
+            if previous_source_date_epoch is not None:
+                # Make sure the SOURCE_DATE_EPOCH is not set in this case
+                del os.environ["SOURCE_DATE_EPOCH"]
+
+            cmd_nonreproducible = sdist(dist)
+            cmd_nonreproducible.ensure_finalized()
+
+            with quiet():
+                cmd_nonreproducible.run()
+
+            def _assert_nonreproducible_tarinfo(tarinfo_member):
+                assert tarinfo_member.mtime > 0
+
+            # SOURCE_DATE_EPOCH is not set so mtime should be copied from the original files
+            self.check_tarfile_members(cmd_nonreproducible, _assert_nonreproducible_tarinfo)
+
+            os.environ["SOURCE_DATE_EPOCH"] = "0"
+            cmd_reproducible = sdist(dist)
+            cmd_reproducible.ensure_finalized()
+
+            with quiet():
+                cmd_reproducible.run()
+
+            def _assert_reproducible_tarinfo(tarinfo_member):
+                assert tarinfo_member.mtime == 0
+                assert tarinfo_member.uid == 0
+                assert tarinfo_member.gid == 0
+                assert tarinfo_member.uname == ""
+                assert tarinfo_member.gname == ""
+
+            self.check_tarfile_members(cmd_reproducible, _assert_reproducible_tarinfo)
+        finally:
+            # Restore SOURCE_DATE_EPOCH to its original value
+            if previous_source_date_epoch is None:
+                if "SOURCE_DATE_EPOCH" in os.environ:
+                    del os.environ["SOURCE_DATE_EPOCH"]
+            else:
+                os.environ["SOURCE_DATE_EPOCH"] = previous_source_date_epoch
 
     @fail_on_ascii
     def test_manifest_is_written_with_utf8_encoding(self):
